@@ -4,28 +4,31 @@
 # - https://opencv-python-tutroals.readthedocs.io/en/latest/
 
 import base64
+import io
 import logging
 import os
 import re
 import time
+import typing
 from typing import Union
 
 import cv2
-import findit
+# import findit
+import imutils
 import numpy as np
 import requests
 from logzero import setup_logger
 from PIL import Image, ImageDraw
 from skimage.metrics import structural_similarity
-import imutils
 
 import uiautomator2
 
+ImageType = typing.Union[np.ndarray, Image.Image]
 
 compare_ssim = structural_similarity
 
 
-def color_bgr2gray(image: Union[np.ndarray, Image.Image]):
+def color_bgr2gray(image: ImageType):
     """ change color image to gray
     Returns:
         opencv-image
@@ -38,7 +41,7 @@ def color_bgr2gray(image: Union[np.ndarray, Image.Image]):
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
-def template_ssim(image_a, image_b):
+def template_ssim(image_a: ImageType, image_b: ImageType):
     """
     Refs:
         https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_template_matching/py_template_matching.html
@@ -50,13 +53,25 @@ def template_ssim(image_a, image_b):
     return max_val
 
 
-def compare_ssim(image_a, image_b, full=False):
+def cv2crop(im: np.ndarray, bounds: tuple = None):
+    if not bounds:
+        return im
+    assert len(bounds) == 4
+
+    lx, ly, rx, ry = bounds 
+    crop_img = im[ly:ry, lx:rx]
+    return crop_img
+
+
+def compare_ssim(image_a: ImageType, image_b: ImageType, full=False, bounds=None):
     a = color_bgr2gray(image_a)
     b = color_bgr2gray(image_b) # template (small)
-    return structural_similarity(a, b, full=full)
+    ca = cv2crop(a, bounds)
+    cb = cv2crop(b, bounds)
+    return structural_similarity(ca, cb, full=full)
 
 
-def compare_ssim_debug(image_a, image_b, color=(255, 0, 0)):
+def compare_ssim_debug(image_a: ImageType, image_b: ImageType, color=(255, 0, 0)):
     """
     Args:
         image_a, image_b: opencv image or PIL.Image
@@ -87,7 +102,7 @@ def show_image(im: Union[np.ndarray, Image.Image]):
     pilim.show()
 
 
-def pil2cv(pil_image):
+def pil2cv(pil_image) -> np.ndarray:
     """ Convert from pillow image to opencv """
     # convert PIL to OpenCV
     pil_image = pil_image.convert('RGB')
@@ -95,6 +110,13 @@ def pil2cv(pil_image):
     # Convert RGB to BGR
     cv2_image = cv2_image[:, :, ::-1].copy()
     return cv2_image
+
+
+def pil2base64(pil_image, format="JPEG") -> str:
+    """ Convert pillow image to base64 """
+    buf = io.BytesIO()
+    pil_image.save(buf, format=format)
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 
 def cv2pil(cv_image):
@@ -167,7 +189,7 @@ def draw_point(im: Image.Image, x: int, y: int) -> Image.Image:
     return im
 
 
-def imread(data):
+def imread(data) -> np.ndarray:
     """
     Args:
         data: local path or http url or data:image/base64,xxx

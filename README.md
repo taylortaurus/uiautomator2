@@ -11,6 +11,9 @@
 
 **该项目正在火热的开发中** QQ群号: *499563266*
 
+**突然插入的招聘**：目前作者的组里（阿里巴巴淘宝质量部：坐标杭州西溪园区）正在进行招聘（HIRE）
+具体内容这里可以看到 https://testerhome.com/topics/23010
+
 <p align="left"><img src="docs/img/qqgroup.png" /></div>
 
 [UiAutomator](https://developer.android.com/training/testing/ui-automator.html)是Google提供的用来做安卓自动化测试的一个Java库，基于Accessibility服务。功能很强，可以对第三方App进行测试，获取屏幕上任意一个APP的任意一个控件属性，并对其进行任意操作，但有两个缺点：1. 测试脚本只能使用Java语言 2. 测试脚本要打包成jar或者apk包上传到设备上才能运行。
@@ -70,9 +73,11 @@ Thank you to all our sponsors! ✨🍰✨
 
 ### 金牌赞助商（Gold Sponsor）
 
-霍格沃兹测试学院是由测吧（北京）科技有限公司与知名软件测试社区 [TesterHome](https://testerhome.com/) 合作的高端教育品牌。由 BAT 一线**测试大咖执教**，提供**实战驱动**的接口自动化测试、移动自动化测试、性能测试、持续集成与 DevOps 等技术培训，以及测试开发优秀人才内推服务。[点击学习!](https://ke.qq.com/course/254956?flowToken=1014757)
+![Logo-霍格沃兹测试学院](https://ceshiren.com/uploads/default/original/2X/2/2529377efc39dffe8ffd96b5aed4b417cdef1a52.png)
 
-- 霍格沃兹测试学院: <https://testing-studio.com>
+[霍格沃兹测试学院](https://ceshiren.com/)是业界领先的测试开发技术高端教育品牌，隶属于测吧（北京）科技有限公司。学院课程均由 BAT 一线测试大咖执教，提供实战驱动的接口自动化测试、移动自动化测试、性能测试、持续集成与 DevOps 等技术培训，以及测试开发优秀人才内推服务。[点击学习!](http://qrcode.testing-studio.com/f?from=ATX&url=https://ke.qq.com/course/254956)
+
+[霍格沃兹测试学院](https://ceshiren.com/)是 ATX 的首家金牌赞助商。
 
 ## 相关项目
 - 设备管理平台，设备多了就会用到 [atxserver2](https://github.com/openatx/atxserver2)
@@ -97,6 +102,7 @@ Thank you to all our sponsors! ✨🍰✨
   - **[Stop all running apps](#stop-all-running-apps)**
   - **[Push and pull files](#push-and-pull-files)**
   - **[Auto click permission dialogs](#auto-click-permission-dialogs)**
+  - **[Open Scheme](#open-scheme)**
 
 **[UI automation](#basic-api-usages)**
   - **[Shell commands](#shell-commands)**
@@ -438,6 +444,17 @@ If this method is not working on your device, You can make a pull request or cre
 
 Now you know the button text and current package name. Make a pull request by update function `disable_popups` or create an [issue](https://github.com/openatx/uiautomator2/issues) if you are not familar with git and python.
 
+### Open Scheme
+You can do it wire adb: `adb shell am start -a android.intent.action.VIEW -d "appname://appnamehost"`
+
+Also you can do it with python code
+
+```python
+d.open_url("https://www.baidu.com")
+d.open_url("taobao://taobao.com") # open Taobao app
+d.open_url("appname://appnamehost")
+```
+
 ## Basic API Usages
 This part showcases how to perform common device operations:
 
@@ -730,9 +747,20 @@ You can find all key code definitions at [Android KeyEvnet](https://developer.an
 * SwipeExt 扩展功能
 
     ```python
-    d.swipe_ext("right") # 屏幕右滑，4选1 "left", "right", "up", "down"
+    d.swipe_ext("right") # 手指右滑，4选1 "left", "right", "up", "down"
     d.swipe_ext("right", scale=0.9) # 默认0.9, 滑动距离为屏幕宽度的90%
     d.swipe_ext("right", box=(0, 0, 100, 100)) # 在 (0,0) -> (100, 100) 这个区域做滑动
+
+	# 实践发现上滑或下滑的时候，从中点开始滑动成功率会高一些
+	d.swipe_ext("up", scale=0.8) # 代码会vkk
+
+    # 还可以使用Direction作为参数
+    from uiautomator2 import Direction
+    
+    d.swipe_ext(Direction.FORWARD) # 页面下翻, 等价于 d.swipe_ext("up"), 只是更好理解
+    d.swipe_ext(Direction.BACKWARD) # 页面上翻
+    d.swipe_ext(Direction.HORIZ_FORWARD) # 页面水平右翻
+    d.swipe_ext(Direction.HORIZ_BACKWARD) # 页面水平左翻
     ```
 
 * Drag
@@ -1029,7 +1057,7 @@ Selector supports below parameters. Refer to [UiSelector Java doc](http://develo
     x, y = d(text="Settings").center()
     # x, y = d(text="Settings").center(offset=(0, 0)) # left-top x, y
     ```
-
+    
 * Take screenshot of widget
 
     ```python
@@ -1165,8 +1193,54 @@ Selector supports below parameters. Refer to [UiSelector Java doc](http://develo
   # scroll forward vertically until specific ui object appears
   d(scrollable=True).scroll.to(text="Security")
   ```
-  
+
+### WatchContext
+目前的这个watch_context是用threading启动的，每2s检查一次
+目前还只有click这一种触发操作
+
+```python
+with d.watch_context() as ctx:
+    ctx.when("^立即(下载|更新)").when("取消").click() # 当同时出现 （立即安装 或 立即取消）和 取消 按钮的时候，点击取消
+    ctx.when("同意").click()
+    ctx.when("确定").click()
+    # 上面三行代码是立即执行完的，不会有什么等待
+    
+    ctx.wait_stable() # 开启弹窗监控，并等待界面稳定（两个弹窗检查周期内没有弹窗代表稳定）
+
+    # 使用call函数来触发函数回调
+    # call 支持两个参数，d和el，不区分参数位置，可以不传参，如果传参变量名不能写错
+    # eg: 当有元素匹配仲夏之夜，点击返回按钮
+    ctx.when("仲夏之夜").call(lambda d: d.press("back"))
+    ctx.when("确定").call(lambda el: el.click())
+
+    # 其他操作
+
+# 为了方便也可以使用代码中默认的弹窗监控逻辑
+# 下面是目前内置的默认逻辑，可以加群at群主，增加新的逻辑，或者直接提pr
+    # when("继续使用").click()
+    # when("移入管控").when("取消").click()
+    # when("^立即(下载|更新)").when("取消").click()
+    # when("同意").click()
+    # when("^(好的|确定)").click()
+with d.watch_context(builtin=True) as ctx:
+    # 在已有的基础上增加
+    ctx.when("@tb:id/jview_view").when('//*[@content-desc="图片"]').click()
+
+    # 其他脚本逻辑
+```
+
+另外一种写法
+
+```python
+ctx = d.watch_context()
+ctx.when("设置").click()
+ctx.wait_stable() # 等待界面不在有弹窗了
+
+ctx.close()
+```
+
 ### Watcher
+**更推荐用WatchContext** 写法更简洁一些
 
 ~~You can register [watchers](http://developer.android.com/tools/help/uiautomator/UiWatcher.html) to perform some actions when a selector does not find a match.~~
 

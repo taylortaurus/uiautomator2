@@ -31,7 +31,7 @@ import threading
 import time
 import warnings
 import xml.dom.minidom
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from datetime import datetime
 from typing import List, Optional, Tuple, Union
 
@@ -61,13 +61,13 @@ from .settings import Settings
 from .swipe import SwipeExt
 from .utils import list2cmdline
 from .version import __atx_agent_version__, __apk_version__
-from .watcher import Watcher
+from .watcher import Watcher, WatchContext
+from ._proto import SCROLL_STEPS, Direction, HTTP_TIMEOUT
 
 if six.PY2:
     FileNotFoundError = OSError
 
 DEBUG = False
-HTTP_TIMEOUT = 60
 WAIT_FOR_DEVICE_TIMEOUT = int(os.getenv("WAIT_FOR_DEVICE_TIMEOUT", 70))
 
 # logger = logging.getLogger("uiautomator2")
@@ -183,8 +183,8 @@ class _AgentRequestSession(TimeoutRequestsSession):
     def request(self, method, url, **kwargs):
         retry = kwargs.pop("retry", True)
         try:
-            url = self.__client.path2url(
-                url)  # may raise adbutils.AdbError when device offline
+            # may raise adbutils.AdbError when device offline
+            url = self.__client.path2url(url)
             return super().request(method, url, **kwargs)
         except (requests.ConnectionError, requests.ReadTimeout,
                 adbutils.AdbError) as e:
@@ -193,11 +193,11 @@ class _AgentRequestSession(TimeoutRequestsSession):
 
             # if atx-agent is already running, just raise error
             if isinstance(e, requests.RequestException) and \
-                self.__client._is_agent_alive():
+                    self.__client._is_agent_alive():
                 raise
 
         if not self.__client._serial:
-            raise EnvironmentError(
+            raise OSError(
                 "http-request to atx-agent error, can only recover from USB")
 
         logger.warning("atx-agent has something wrong, auto recovering")
@@ -214,11 +214,12 @@ class _BaseClient(object):
     """
     提供最基础的控制类，这个类暂时先不公开吧
     """
+
     def __init__(self, serial_or_url: Optional[str] = None):
         """
         Args:
             serial_or_url: device serialno or atx-agent base url
-        
+
         Example:
             serial_or_url support param like
             - 08a3d291
@@ -250,7 +251,7 @@ class _BaseClient(object):
         try:
             lport = self._adb_device.forward_port(
                 7912)  # this method is so fast, only take 0.2ms
-            return f"http://localhost:{lport}"
+            return f"http://127.0.0.1:{lport}"
         except adbutils.AdbError as e:
             if not _is_production() and self._atx_agent_url:
                 # when device offline, use atx-agent-url
@@ -341,12 +342,15 @@ class _BaseClient(object):
 
         from uiautomator2 import init
         for (name, url) in init.app_uiautomator_apk_urls():
-            apk_path = init.cache_download(url)
-            target_path = os.path.join("/data/local/tmp",
-                                       os.path.basename(apk_path))
+            apk_path = init.mirror_download(url)
+            target_path = "/data/local/tmp/" + os.path.basename(apk_path)
             self.push(apk_path, target_path)
             logger.debug("pm install %s", target_path)
             self.shell(['pm', 'install', '-r', '-t', target_path])
+
+    def sleep(self, seconds: float):
+        """ same as time.sleep """
+        time.sleep(seconds)
 
     def shell(self, cmdargs: Union[str, List[str]], stream=False, timeout=60):
         """
@@ -429,7 +433,7 @@ class _BaseClient(object):
                 http_timeout = kwargs.pop('http_timeout', HTTP_TIMEOUT)
                 params = args if args else kwargs
                 return self.server._jsonrpc_retry_call(self.method, params,
-                                                      http_timeout)
+                                                       http_timeout)
 
         return JSONRpcWrapper(self)
 
@@ -439,7 +443,7 @@ class _BaseClient(object):
         except (requests.ReadTimeout,
                 ServerError,
                 UiAutomationNotConnectedError) as e:
-            self.reset_uiautomator(str(e)) # uiautomator可能出问题了，强制重启一下
+            self.reset_uiautomator(str(e))  # uiautomator可能出问题了，强制重启一下
         except (NullObjectExceptionError,
                 NullPointerExceptionError,
                 StaleObjectExceptionError) as e:
@@ -450,7 +454,7 @@ class _BaseClient(object):
         """ jsonrpc2 call
         Refs:
             - http://www.jsonrpc.org/specification
-        
+
         Raises:
             出现的错误一般有2大类:
                 - JSONRPC服务端异常 ServerError
@@ -465,9 +469,9 @@ class _BaseClient(object):
         }
         data = json.dumps(data)
         res = self.http.post("/jsonrpc/0",
-            headers={"Content-Type": "application/json"},
-            data=data,
-            timeout=http_timeout)
+                             headers={"Content-Type": "application/json"},
+                             data=data,
+                             timeout=http_timeout)
 
         if res.status_code == 502:
             raise GatewayError(
@@ -521,7 +525,8 @@ class _BaseClient(object):
     def _is_agent_alive(self):
         try:
             url = self.path2url("/version")
-            r = requests.get(url, timeout=2) # should not use self.http.get here
+            # should not use self.http.get here
+            r = requests.get(url, timeout=2)
             if r.status_code == 200:
                 return True
         except requests.RequestException as e:
@@ -601,9 +606,8 @@ class _BaseClient(object):
         if launch_test_app:
             self._grant_app_permissions()
             self.shell(['am', 'start', '-a', 'android.intent.action.MAIN', '-c',
-                'android.intent.category.LAUNCHER', '-n', package_name + "/" + ".ToastActivity"])
-            # self.app_start(package_name,
-            #                ".ToastActivity")  # -e showFloatWindow true
+                        'android.intent.category.LAUNCHER', '-n', package_name + "/" + ".ToastActivity"])
+            
         self.uiautomator.start()
 
         # wait until uiautomator2 service is working
@@ -617,6 +621,11 @@ class _BaseClient(object):
                 break
 
             if self._is_alive():
+                # 显示悬浮窗，增加稳定性
+                # 可能会带来悬浮窗对话框
+                # 目前先测试一下，之后需要改版一下
+                if os.getenv("TMQ"):
+                    self.show_float_window(True)
                 return True
             time.sleep(1.0)
 
@@ -724,7 +733,8 @@ class _BaseClient(object):
             if re.match(r"^https?://", src):
                 r = requests.get(src, stream=True)
                 if r.status_code != 200:
-                    raise IOError("Request URL {!r} status_code {}".format(src, r.status_code))
+                    raise IOError(
+                        "Request URL {!r} status_code {}".format(src, r.status_code))
                 filesize = int(r.headers.get("Content-Length", "0"))
                 fileobj = r.raw
             elif os.path.isfile(src):
@@ -738,8 +748,8 @@ class _BaseClient(object):
 
         try:
             r = self.http.post(pathname,
-                          data={'mode': modestr},
-                          files={'file': fileobj})
+                               data={'mode': modestr},
+                               files={'file': fileobj})
             if r.status_code == 200:
                 return r.json()
             raise IOError("push", "%s -> %s" % (src, dst), r.text)
@@ -832,14 +842,14 @@ class _Device(_BaseClient):
 
         Returns:
             PIL.Image.Image, np.ndarray (OpenCV format) or None
-        
+
         Args:
             filename (str): saved filename, if filename is set then return None
             format (str): used when filename is empty. one of ["pillow", "opencv", "raw"]
 
         Raises:
             IOError, SyntaxError, ValueError
-        
+
         Examples:
             screenshot("saved.jpg")
             screenshot().save("saved.png")
@@ -854,8 +864,13 @@ class _Device(_BaseClient):
             buff = io.BytesIO(r.content)
             try:
                 return Image.open(buff).convert("RGB")
-            except Exception as ex:
-                raise IOError("PIL.Image.open IOError", ex)
+            except IOError as ex:
+                # Always fail in secure page
+                # 截图失败直接返回一个粉色的图片
+                # d.settings['default_screenshot'] =
+                if not self.settings['fallback_to_blank_screenshot']:
+                    raise IOError("PIL.Image.open IOError", ex)
+                return Image.new("RGB", self.window_size(), (220, 120, 100))
         elif format == 'opencv':
             import cv2
             import numpy as np
@@ -927,7 +942,6 @@ class _Device(_BaseClient):
 
         return _convert
 
-
     @contextlib.contextmanager
     def _operation_delay(self, operation_name: str = None):
         before, after = self.settings['operation_delay']
@@ -994,7 +1008,7 @@ class _Device(_BaseClient):
         time.sleep(duration)
         self.click(x, y)  # use click last is for htmlreport
 
-    def long_click(self, x, y, duration: float=.5):
+    def long_click(self, x, y, duration: float = .5):
         '''long click at arbitrary coordinates.
         Args:
             duration (float): seconds of pressed
@@ -1003,7 +1017,7 @@ class _Device(_BaseClient):
         with self._operation_delay("click"):
             return self.touch.down(x, y).sleep(duration).up(x, y)
 
-    def swipe(self, fx, fy, tx, ty, duration=0.1, steps=None):
+    def swipe(self, fx, fy, tx, ty, duration: Optional[float] = None, steps: Optional[int] = None):
         """
         Args:
             fx, fy: from position
@@ -1021,12 +1035,15 @@ class _Device(_BaseClient):
         rel2abs = self.pos_rel2abs
         fx, fy = rel2abs(fx, fy)
         tx, ty = rel2abs(tx, ty)
+        if not duration:
+            steps = SCROLL_STEPS
         if not steps:
             steps = int(duration * 200)
+        steps = max(2, steps)  # step=1 has no swipe effect
         with self._operation_delay("swipe"):
             return self.jsonrpc.swipe(fx, fy, tx, ty, steps)
 
-    def swipe_points(self, points, duration=0.5):
+    def swipe_points(self, points, duration: float = 0.5):
         """
         Args:
             points: is point array containg at least one point object. eg [[200, 300], [210, 320]]
@@ -1041,7 +1058,8 @@ class _Device(_BaseClient):
             x, y = rel2abs(p[0], p[1])
             ppoints.append(x)
             ppoints.append(y)
-        return self.jsonrpc.swipePoints(ppoints, int(duration * 200))
+        steps = int(duration * 200)
+        return self.jsonrpc.swipePoints(ppoints, steps)
 
     def drag(self, sx, sy, ex, ey, duration=0.5):
         '''Swipe from one point to another point.'''
@@ -1107,6 +1125,10 @@ class _Device(_BaseClient):
     def open_quick_settings(self):
         return self.jsonrpc.openQuickSettings()
 
+    def open_url(self, url: str):
+        self.shell(
+            ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', url])
+
     def exists(self, **kwargs):
         return self(**kwargs).exists
 
@@ -1151,7 +1173,7 @@ class _Device(_BaseClient):
             return self._serial
         return self.shell(['getprop', 'ro.serialno']).output.strip()
 
-    def _show_float_window(self, show=True):
+    def show_float_window(self, show=True):
         """ 显示悬浮窗，提高uiautomator运行的稳定性 """
         arg = str(show).lower()
         self.shell([
@@ -1217,13 +1239,14 @@ class _AppMixIn:
         if text.isdigit():
             return int(text)
 
+    @retry(OSError, delay=.3, tries=3, logger=logging)
     def app_current(self):
         """
         Returns:
             dict(package, activity, pid?)
 
         Raises:
-            EnvironementError
+            OSError
 
         For developer:
             Function reset_uiautomator need this function, so can't use jsonrpc here.
@@ -1257,7 +1280,7 @@ class _AppMixIn:
                        pid=int(m.group('pid')))
         if ret:  # get last result
             return ret
-        raise EnvironmentError("Couldn't get focused app")
+        raise OSError("Couldn't get focused app")
 
     def app_install(self, data):
         """
@@ -1291,7 +1314,7 @@ class _AppMixIn:
             time.sleep(.5)
         return False
 
-    def app_start(self, package_name: str, activity: Optional[str]=None, wait: bool = False, stop: bool=False, use_monkey: bool=False):
+    def app_start(self, package_name: str, activity: Optional[str] = None, wait: bool = False, stop: bool = False, use_monkey: bool = False):
         """ Launch application
         Args:
             package_name (str): package name
@@ -1522,7 +1545,7 @@ class _DeprecatedMixIn:
             if launch_timeout:
                 request_data["timeout"] = str(launch_timeout)
             resp = self.http.post("/session/" + package_name,
-                                 data=request_data)
+                                  data=request_data)
             if resp.status_code == 410:  # Gone
                 raise SessionBrokenError(package_name, resp.text)
             resp.raise_for_status()
@@ -1604,13 +1627,13 @@ class _InputMethodMixIn:
     def send_action(self, code):
         """
         Simulate input method edito code
-        
+
         Args:
             code (str or int): input method editor code
-        
+
         Examples:
             send_action("search"), send_action(3)
-        
+
         Refs:
             https://developer.android.com/reference/android/view/inputmethod/EditorInfo
         """
@@ -1646,7 +1669,7 @@ class _InputMethodMixIn:
         """ wait FastInputIME is ready
         Args:
             timeout(float): maxium wait time
-        
+
         Raises:
             EnvironmentError
         """
@@ -1682,11 +1705,15 @@ class _InputMethodMixIn:
 
 
 class _PluginMixIn:
-    # __plugins = {}
-
     @cached_property
     def settings(self) -> Settings:
         return Settings(self)
+
+    def watch_context(self, autostart: bool = True, builtin: bool = False) -> WatchContext:
+        wc = WatchContext(self, builtin=builtin)
+        if autostart:
+            wc.start()
+        return wc
 
     @cached_property
     def watcher(self) -> Watcher:
@@ -1733,7 +1760,7 @@ class _PluginMixIn:
     def swipe_ext(self) -> SwipeExt:
         return SwipeExt(self)
 
-    #def _find_element(self, xpath: str, _class=None, pos=None, activity=None, package=None):
+    # def _find_element(self, xpath: str, _class=None, pos=None, activity=None, package=None):
     #    raise NotImplementedError()
 
     # def __getattr__(self, attr):
@@ -1828,7 +1855,7 @@ def connect_adb_wifi(addr) -> Device:
     return connect_usb(addr)
 
 
-def connect_usb(serial: Optional[str] = None, init: bool=False) -> Device:
+def connect_usb(serial: Optional[str] = None, init: bool = False) -> Device:
     """
     Args:
         serial (str): android device serial
